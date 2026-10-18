@@ -11,7 +11,7 @@ async function api(path, method = 'GET', body) {
   if (!r.ok) throw new Error(j.error || 'Something went wrong. Please try again.');
   return j;
 }
-// Stop double-taps / button mashing: lock the submit button briefly
+//Stop double-taps / button mashing by locking the submit button briefly
 function guard(e) {
   e.preventDefault(); const b = e.target.querySelector('button');
   if (b.disabled) return false;
@@ -20,54 +20,58 @@ function guard(e) {
   return true;
 }
 const formData = (f) => Object.fromEntries(new FormData(f));
+//One key per form fill so a double tap or retry returns the same record while a new fill gets a new key
+const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2));
+const keys = {};
+const withKey = (f) => ({ ...formData(f), idemKey: (keys[f.id] ||= newKey()) });
+const doneKey = (f) => { delete keys[f.id]; };
 const codeBox = (c) => `<div class="card"><p>Write this code down or tell a volunteer. You need it to check back:</p><div class="code">${esc(c)}</div></div>`;
 const fail = (el, e) => (el.innerHTML = `<p class="err">${esc(e.message)}</p>`);
 
-// Tabs
+//Tabs
 document.querySelectorAll('nav button').forEach((b) => b.onclick = () => {
   document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
   document.querySelectorAll('main > section').forEach((s) => (s.hidden = s.id !== 'tab-' + b.dataset.tab));
   if (b.dataset.tab === 'staff' && PIN) loadStaff();
 });
 
-// Search
+//Search
 $('#searchForm').onsubmit = async (e) => {
   e.preventDefault(); const out = $('#searchOut');
   try {
     const { results } = await api('/search', 'POST', formData(e.target));
     out.innerHTML = results.length
-      ? results.map((r) => `<div class="card"><b>${esc(r.name)}</b> (${esc(r.ageGroup)})<br>Is at: <b>${esc(r.shelter || 'unknown')}</b><br><span class="muted">${esc(r.description)}</span></div>`).join('')
+      ? results.map((r) => `<div class="card"><b>${esc(r.name || 'Name not given')}</b> (${esc(r.ageGroup)})<br>Is at: <b>${esc(r.shelter || 'unknown')}</b><br><span class="muted">${esc(r.description)}</span></div>`).join('')
       : `<div class="card">No public match yet. Some people choose to stay private, so please leave a note below. If they check in we'll ask them for you.</div>`;
   } catch (er) { fail(out, er); }
 };
 $('#reportForm').onsubmit = async (e) => {
   if (!guard(e)) return; const out = $('#reportOut');
-  try { const { code } = await api('/reports', 'POST', formData(e.target)); out.innerHTML = codeBox(code) + '<p>Check back with "My code". We will keep watching.</p>'; e.target.reset(); }
+  try { const { code } = await api('/reports', 'POST', withKey(e.target)); out.innerHTML = codeBox(code) + '<p>Check back under "Code Check In". We will keep watching.</p>'; doneKey(e.target); e.target.reset(); }
   catch (er) { fail(out, er); }
 };
 
-// Check-in
+//Check-in
 $('#checkinForm').onsubmit = async (e) => {
   if (!guard(e)) return; const out = $('#checkinOut');
   try { localStorage.setItem('shelter', e.target.shelter.value); } catch {}
   try {
-    const r = await api('/people', 'POST', formData(e.target));
-    out.innerHTML = codeBox(r.code) + `<p>Privacy: <b>${esc({ open: 'anyone can see where you are', ask: 'we ask you first', hidden: 'no one is told' }[r.visibility])}</b>. You can change this any time under "My code".</p>`;
-    e.target.reset();
+    const r = await api('/people', 'POST', withKey(e.target));
+    out.innerHTML = codeBox(r.code) + `<p>Privacy: <b>${esc({ open: 'anyone can see where you are', ask: 'we ask you first', hidden: 'no one is told' }[r.visibility])}</b>. You can change this any time under "Code Check In".</p>`;
+    doneKey(e.target); e.target.reset();
   } catch (er) { fail(out, er); }
 };
 
 $('#codeForm').onsubmit = async (e) => {
   e.preventDefault(); const out = $('#codeOut'); const code = formData(e.target).code.trim().toUpperCase();
   try {
-    let d;
-    try { d = await api('/people/' + code); } catch { d = await api('/reports/' + code); }
+    const d = await api('/lookup/' + encodeURIComponent(code));
     if (d.kind === 'report') {
       out.innerHTML = d.status === 'found'
         ? d.connections.map((c) => `<div class="card"><b>Good news.</b> ${esc(d.lookingFor)} agreed to be in touch.<br>Where: <b>${esc(c.shelter || 'ask staff')}</b><br>Contact: ${esc(c.contact_note || 'ask at that location')}</div>`).join('')
         : `<div class="card">Still waiting on "${esc(d.lookingFor)}". Check back again later. We keep watching new check-ins.</div>`;
     } else {
-      out.innerHTML = `<div class="card"><b>${esc(d.name)}</b><br>Location: ${esc(d.shelter || 'not set')}</div>` +
+      out.innerHTML = `<div class="card"><b>${esc(d.name || 'Name not given')}</b><br>Location: ${esc(d.shelter || 'not set')}</div>` +
         (d.requests.length ? '<h3>Someone is looking for you</h3>' + d.requests.map((r) => `<div class="card">
           <b>${esc(r.seeker_name || 'Someone')}</b> says: ${esc(r.message || '(no message)')}
           <br><span class="muted">${esc(r.seeker_contact)}</span><br>
@@ -79,7 +83,7 @@ $('#codeForm').onsubmit = async (e) => {
          <button class="danger" data-act="erase" data-code="${code}">Delete my record</button>`;
       if ($('#upVis')) $('#upVis').value = d.visibility;
     }
-  } catch (er) { fail(out, new Error('Code not found. Check the letters and numbers.')); }
+  } catch (er) { fail(out, new Error(/not found/i.test(er.message) ? 'Code not found. Check the letters and numbers.' : er.message)); }
 };
 
 document.addEventListener('click', async (e) => {
@@ -95,7 +99,7 @@ document.addEventListener('click', async (e) => {
   } catch (er) { b.disabled = false; alert(er.message); }
 });
 
-// Staff
+//Staff
 $('#pinForm').onsubmit = (e) => { e.preventDefault(); PIN = formData(e.target).pin; sessionStorage.setItem('pin', PIN); loadStaff(); };
 $('#staffQ').oninput = () => loadStaff();
 async function loadStaff() {
@@ -132,7 +136,7 @@ $('#importBtn').onclick = async () => {
   catch (er) { $('#importOut').textContent = er.message; }
 };
 
-// Remember the shelter so a volunteer can enter many people quickly
+//Remember the shelter so a volunteer can enter many people quickly
 function restoreShelter() { try { $('#checkinForm').shelter.value = localStorage.getItem('shelter') || ''; } catch {} }
 restoreShelter();
 $('#checkinForm').addEventListener('reset', () => setTimeout(restoreShelter, 0));
